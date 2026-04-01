@@ -1,0 +1,79 @@
+(module pe
+  (ports
+    (input clk rst_n)
+    (input a 8)
+    (input b 8)
+    (input p_in 16)
+    (output reg a_out 8)
+    (output reg b_out 8)
+    (output reg p_out 16)
+  )
+
+  (process (or (posedge clk) (negedge rst_n))
+    (if (not rst_n)
+        (begin
+          (nb-write (signal a_out) 8'd0)
+          (nb-write (signal b_out) 8'd0)
+          (nb-write (signal p_out) 16'd0)
+        )
+        (begin
+          (nb-write (signal a_out) a)
+          (nb-write (signal b_out) b)
+          (nb-write (signal p_out) (+ p_in (* a b)))
+        )
+    )
+  )
+)
+
+(macro define-systolic-array (name N data-width sum-width)
+  (expil!
+    (module name
+      (ports
+        (input clk rst_n)
+        (foreach! (between! 0 N) i
+          (input (add! (str! a_in_) i) data-width))
+        (foreach! (between! 0 N) i
+          (input (add! (str! b_in_) i) data-width))
+        (foreach! (between! 0 N) i
+          (output (add! (str! sum_out_) i) sum-width)))
+
+      (foreach! (between! 0 (*! N N)) idx
+        (begin
+          (wire (add! (str! w_a_) idx) data-width)
+          (wire (add! (str! w_b_) idx) data-width)
+          (wire (add! (str! w_p_) idx) sum-width)))
+
+      (foreach! (between! 0 N) i
+        (foreach! (between! 0 N) j
+          (instance pe (add! (str! pe_inst_) (+! (*! i N) j))
+            (port-map
+              (clk clk)
+              (rst_n rst_n)
+
+              (a (if! (==! j 0)
+                       (add! (str! a_in_) i)
+                       (add! (str! w_a_) (+! (*! i N) (-! j 1)))))
+
+              (b (if! (==! i 0)
+                       (add! (str! b_in_) j)
+                       (add! (str! w_b_) (+! (*! (-! i 1) N) j))))
+
+              (p_in (if! (==! i 0)
+                          16'd0
+                          (add! (str! w_p_) (+! (*! (-! i 1) N) j))))
+
+              (a_out (add! (str! w_a_) (+! (*! i N) j)))
+              (b_out (add! (str! w_b_) (+! (*! i N) j)))
+              (p_out (add! (str! w_p_) (+! (*! i N) j)))
+            )
+          )
+        )
+      )
+      (foreach! (between! 0 N) j
+        (assign (add! (str! sum_out_) j)
+          (add! (str! w_p_) (+! (*! (-! N 1) N) j))))
+    )
+  )
+)
+
+(define-systolic-array my_systolic_128x128 128 8 16)
