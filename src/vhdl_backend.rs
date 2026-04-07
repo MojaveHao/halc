@@ -8,7 +8,6 @@ impl VhdlBackend {
         VhdlBackend
     }
 
-    // 辅助函数：根据位宽生成 VHDL 的 STD_LOGIC 或 STD_LOGIC_VECTOR
     fn get_type(&self, width: &Option<String>) -> String {
         match width {
             Some(w_str) => {
@@ -19,7 +18,6 @@ impl VhdlBackend {
                         format!("STD_LOGIC_VECTOR({} downto 0)", w - 1)
                     }
                 } else {
-                    // 若宽度不是数字（如宏），直接带入
                     format!("STD_LOGIC_VECTOR({} - 1 downto 0)", w_str)
                 }
             }
@@ -27,52 +25,30 @@ impl VhdlBackend {
         }
     }
 
-    // 辅助函数：将 Verilog 风格字面量转为 VHDL 风格字面量
     fn convert_literal(&self, s: &str) -> String {
-        // 查找 Verilog 的位宽分隔符 "'"
         if let Some(idx) = s.find('\'') {
             let width_str = &s[..idx];
             let radix_and_val = &s[idx + 1..];
-
             if radix_and_val.is_empty() {
-                return s.to_string(); // 异常保护
+                return s.to_string();
             }
-
             let radix = &radix_and_val[0..1].to_lowercase();
             let val_str = &radix_and_val[1..];
-
-            // 解析位宽，如果解析失败默认给个 32
             let width = width_str.parse::<usize>().unwrap_or(32);
-
             match radix.as_str() {
                 "b" => {
                     if width == 1 {
-                        format!("'{}'", val_str) // 单比特: '1'
+                        format!("'{}'", val_str)
                     } else {
-                        format!("\"{}\"", val_str) // 多比特: "1010"
+                        format!("\"{}\"", val_str)
                     }
                 }
-                "h" => {
-                    // 十六进制: x"FF"
-                    // 注意：VHDL的十六进制字符串位宽必须是4的倍数并且和目标匹配
-                    // 理想情况下这里应该做补零对齐，这里先做基础转换
-                    format!("x\"{}\"", val_str)
-                }
-                "d" => {
-                    // 十进制: 必须借用 numeric_std 库转换
-                    // 例如: 8'd255 -> std_logic_vector(to_unsigned(255, 8))
-                    format!("std_logic_vector(to_unsigned({}, {}))", val_str, width)
-                }
-                "o" => {
-                    // 八进制: o"77"
-                    format!("o\"{}\"", val_str)
-                }
+                "h" => format!("x\"{}\"", val_str),
+                "d" => format!("std_logic_vector(to_unsigned({}, {}))", val_str, width),
+                "o" => format!("o\"{}\"", val_str),
                 _ => s.to_string(),
             }
         } else {
-            // 没有找到 "'" 说明可能是纯数字（如 "0"）或者只是个字符串
-            // 在 VHDL 中，纯数字会被当作 integer。如果是给 std_logic 赋值可能会报错，
-            // 但如果是在 for 循环索引等场景则是对的。先原样返回。
             s.to_string()
         }
     }
@@ -92,14 +68,11 @@ impl Backend for VhdlBackend {
 impl VhdlBackend {
     fn gen_module(&self, module: &Module) -> Result<String, String> {
         let mut lines = Vec::new();
-
-        // 1. 引入 VHDL 标准库
         lines.push("library IEEE;".to_string());
         lines.push("use IEEE.STD_LOGIC_1164.ALL;".to_string());
         lines.push("use IEEE.NUMERIC_STD.ALL;".to_string());
         lines.push("".to_string());
 
-        // 2. 实体 (Entity) 声明
         lines.push(format!("entity {} is", module.name));
         if !module.ports.is_empty() {
             lines.push("    Port (".to_string());
@@ -118,20 +91,15 @@ impl VhdlBackend {
         lines.push(format!("end {};", module.name));
         lines.push("".to_string());
 
-        // 3. 架构 (Architecture) 声明
         lines.push(format!("architecture Behavioral of {} is", module.name));
-
-        // 信号声明 (包含 wires 和 regs)
         for wire in &module.wires {
             lines.push(format!("    signal {} : {};", wire.name, self.get_type(&wire.width)));
         }
         for reg in &module.regs {
             lines.push(format!("    signal {} : {};", reg.name, self.get_type(&reg.width)));
         }
-
         lines.push("begin".to_string());
 
-        // 连续赋值 (Assign)
         for assign in &module.assigns {
             lines.push(format!(
                 "    {} <= {};",
@@ -140,12 +108,10 @@ impl VhdlBackend {
             ));
         }
 
-        // 进程 (Process)
         for proc in &module.processes {
             lines.push(self.gen_process(proc)?);
         }
 
-        // 实例化 (Instance)
         for inst in &module.instances {
             lines.push(self.gen_instance(inst)?);
         }
@@ -175,7 +141,7 @@ impl VhdlBackend {
             }
             Expr::Concat(exprs) => {
                 let parts: Vec<String> = exprs.iter().map(|e| self.gen_expr(e)).collect();
-                format!("({})", parts.join(" & ")) // VHDL 用 & 做拼接
+                format!("({})", parts.join(" & "))
             }
             Expr::UnaryOp(op, e) => {
                 let op_str = match op {
@@ -184,26 +150,44 @@ impl VhdlBackend {
                 format!("{} {}", op_str, self.gen_expr(e))
             }
             Expr::BinaryOp(op, e1, e2) => {
-                let op_str = match op {
-                    BinaryOp::And => "and",
-                    BinaryOp::Or => "or",
-                    BinaryOp::Xor => "xor",
-                    BinaryOp::Add => "+",
-                    BinaryOp::Sub => "-",
-                    BinaryOp::Mul => "*",
-                    BinaryOp::Eq => "=",
-                    BinaryOp::Ne => "/=",
-                    BinaryOp::Lt => "<",
-                    BinaryOp::Le => "<=",
-                    BinaryOp::Gt => ">",
-                    BinaryOp::Ge => ">=",
-                    BinaryOp::Shl => "sll", // 或者 shift_left 根据库的兼容性
-                    BinaryOp::Shr => "srl",
-                };
-                format!("({} {} {})", self.gen_expr(e1), op_str, self.gen_expr(e2))
+                let l = self.gen_expr(e1);
+                let r = self.gen_expr(e2);
+                match op {
+                    // 算术运算：需要转换为 unsigned 进行运算，再转回 std_logic_vector
+                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
+                        let op_str = match op {
+                            BinaryOp::Add => "+",
+                            BinaryOp::Sub => "-",
+                            BinaryOp::Mul => "*",
+                            _ => unreachable!(),
+                        };
+                        format!("std_logic_vector(unsigned({}) {} unsigned({}))", l, op_str, r)
+                    }
+                    BinaryOp::Shl => {
+                        format!("std_logic_vector(shift_left(unsigned({}), {}))", l, r)
+                    }
+                    BinaryOp::Shr => {
+                        format!("std_logic_vector(shift_right(unsigned({}), {}))", l, r)
+                    }
+                    // 逻辑运算和比较运算：直接使用
+                    _ => {
+                        let op_str = match op {
+                            BinaryOp::And => "and",
+                            BinaryOp::Or => "or",
+                            BinaryOp::Xor => "xor",
+                            BinaryOp::Eq => "=",
+                            BinaryOp::Ne => "/=",
+                            BinaryOp::Lt => "<",
+                            BinaryOp::Le => "<=",
+                            BinaryOp::Gt => ">",
+                            BinaryOp::Ge => ">=",
+                            _ => unreachable!(),
+                        };
+                        format!("({} {} {})", l, op_str, r)
+                    }
+                }
             }
             Expr::Cond(c, t, e) => {
-                // VHDL-2008 支持条件表达式
                 format!(
                     "({} when {} else {})",
                     self.gen_expr(t),
@@ -215,24 +199,146 @@ impl VhdlBackend {
     }
 
     fn gen_process(&self, proc: &Process) -> Result<String, String> {
-        let sens_list: Vec<String> = proc
-            .sensitivity
-            .iter()
-            .map(|s| match s {
-                Sensitivity::PosEdge(sig) => sig.clone(),
-                Sensitivity::NegEdge(sig) => sig.clone(),
-                Sensitivity::Level(sig) => sig.clone(),
-            })
-            .collect();
+        let mut clk_edge = None;
+        let mut rst_edge = None;
+        let mut level_signals = Vec::new();
 
-        let sens_str = sens_list.join(", ");
-        let body = self.gen_statements(&proc.body, "        ");
+        for sens in &proc.sensitivity {
+            match sens {
+                Sensitivity::PosEdge(s) => {
+                    let sig = s.to_lowercase();
+                    if sig.contains("clk") || sig.contains("clock") {
+                        clk_edge = Some((s.clone(), true));
+                    } else if sig.contains("rst") || sig.contains("reset") {
+                        rst_edge = Some((s.clone(), true));
+                    } else {
+                        level_signals.push(s.clone());
+                    }
+                }
+                Sensitivity::NegEdge(s) => {
+                    let sig = s.to_lowercase();
+                    if sig.contains("clk") || sig.contains("clock") {
+                        clk_edge = Some((s.clone(), false));
+                    } else if sig.contains("rst") || sig.contains("reset") {
+                        rst_edge = Some((s.clone(), false));
+                    } else {
+                        level_signals.push(s.clone());
+                    }
+                }
+                Sensitivity::Level(s) => {
+                    level_signals.push(s.clone());
+                }
+            }
+        }
+
+        let mut sensitivity_list = Vec::new();
+        if let Some((clk, _)) = &clk_edge {
+            sensitivity_list.push(clk.clone());
+        }
+        if let Some((rst, _)) = &rst_edge {
+            sensitivity_list.push(rst.clone());
+        }
+        sensitivity_list.extend(level_signals);
+        let sens_str = sensitivity_list.join(", ");
+
+        let indent = "        ";
+        let body_code = if clk_edge.is_some() {
+            let (clk_sig, clk_pos) = clk_edge.as_ref().unwrap();
+            let clock_cond = if *clk_pos {
+                format!("rising_edge({})", clk_sig)
+            } else {
+                format!("falling_edge({})", clk_sig)
+            };
+
+            let (reset_stmts, clock_stmts) = self.extract_reset_and_clock_bodies(&proc.body, rst_edge.as_ref());
+
+            let mut lines = Vec::new();
+
+            if let Some((rst_sig, rst_pos)) = rst_edge {
+                let reset_cond = if rst_pos {
+                    format!("{} = '1'", rst_sig)
+                } else {
+                    format!("{} = '0'", rst_sig)
+                };
+                lines.push(format!("{}if {} then", indent, reset_cond));
+                if !reset_stmts.is_empty() {
+                    lines.push(self.gen_statements(&reset_stmts, &format!("{}    ", indent)));
+                } else {
+                    lines.push(format!("{}    -- No reset assignments provided", indent));
+                }
+                lines.push(format!("{}elsif {} then", indent, clock_cond));
+            } else {
+                lines.push(format!("{}if {} then", indent, clock_cond));
+            }
+
+            if !clock_stmts.is_empty() {
+                lines.push(self.gen_statements(&clock_stmts, &format!("{}    ", indent)));
+            } else {
+                lines.push(format!("{}    -- No clocked statements", indent));
+            }
+            lines.push(format!("{}end if;", indent));
+
+            lines.join("\n")
+        } else {
+            self.gen_statements(&proc.body, indent)
+        };
 
         Ok(format!(
-            "    process({})\n    begin\n{}    end process;",
+            "    process({})\n    begin\n{}{}    end process;",
             sens_str,
-            body
+            body_code,
+            if body_code.is_empty() { "" } else { "\n" }
         ))
+    }
+
+    fn extract_reset_and_clock_bodies(
+        &self,
+        stmts: &[Statement],
+        rst_edge: Option<&(String, bool)>,
+    ) -> (Vec<Statement>, Vec<Statement>) {
+        if stmts.len() != 1 {
+            return (Vec::new(), stmts.to_vec());
+        }
+        match &stmts[0] {
+            Statement::If(cond, then_stmts, else_stmts) => {
+                let is_reset_condition = match (cond, rst_edge) {
+                    (Expr::UnaryOp(UnaryOp::Not, e), Some((rst_sig, pos))) => {
+                        if let Expr::Ident(s) = e.as_ref() {
+                            s == rst_sig && !pos
+                        } else {
+                            false
+                        }
+                    }
+                    (Expr::BinaryOp(BinaryOp::Eq, e1, e2), Some((rst_sig, pos))) => {
+                        let (left, right) = (e1.as_ref(), e2.as_ref());
+                        match (left, right) {
+                            (Expr::Ident(s), Expr::Literal(lit)) if s == rst_sig => {
+                                if *pos {
+                                    lit == "1"
+                                } else {
+                                    lit == "0"
+                                }
+                            }
+                            (Expr::Literal(lit), Expr::Ident(s)) if s == rst_sig => {
+                                if *pos {
+                                    lit == "1"
+                                } else {
+                                    lit == "0"
+                                }
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                };
+                if is_reset_condition {
+                    (then_stmts.clone(), else_stmts.clone())
+                } else {
+                    (Vec::new(), stmts.to_vec())
+                }
+            }
+            _ => (Vec::new(), stmts.to_vec()),
+        }
     }
 
     fn gen_statements(&self, stmts: &[Statement], indent: &str) -> String {
@@ -240,8 +346,6 @@ impl VhdlBackend {
         for stmt in stmts {
             match stmt {
                 Statement::BlockWrite(target, expr) => {
-                    // VHDL中 := 通常用于 variable，<= 用于 signal。
-                    // 此处严格区分以保留 AST 的语义意图。
                     lines.push(format!(
                         "{}{} := {};",
                         indent,
@@ -258,10 +362,8 @@ impl VhdlBackend {
                     ));
                 }
                 Statement::If(cond, then_body, else_body) => {
-                    // 默认这里的条件已经能在 VHDL 环境中求值为 boolean 或是处理后的 std_logic。
                     lines.push(format!("{}if {} then", indent, self.gen_expr(cond)));
                     lines.push(self.gen_statements(then_body, &format!("{}    ", indent)));
-
                     if !else_body.is_empty() {
                         lines.push(format!("{}else", indent));
                         lines.push(self.gen_statements(else_body, &format!("{}    ", indent)));
@@ -279,7 +381,6 @@ impl VhdlBackend {
 
     fn gen_instance(&self, inst: &Instance) -> Result<String, String> {
         let mut lines = Vec::new();
-        // VHDL direct instantiation (entity work.xxx)
         lines.push(format!("    {}: entity work.{}", inst.instance_name, inst.module_name));
         lines.push("        port map (".to_string());
 
