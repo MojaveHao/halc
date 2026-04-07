@@ -23,56 +23,69 @@ impl Backend for VerilogBackend {
 impl VerilogBackend {
     fn gen_module(&self, module: &Module) -> Result<String, String> {
         let mut lines = Vec::new();
-        lines.push(format!("module {} (", module.name));
-        // 端口列表
-        let port_names: Vec<&str> = module.ports.iter().map(|p| p.name.as_str()).collect();
-        lines.push(format!("    {} );", port_names.join(", ")));
 
-        for port in &module.ports {
-            let mut parts = Vec::new();
-            parts.push(match port.direction {
-                PortDir::Input => "input".to_string(),
-                PortDir::Output => "output".to_string(),
-                PortDir::Inout => "inout".to_string(),
-            });
-            if port.reg {
-                parts.push("reg".to_string());
-            }
-            if let Some(w_str) = &port.width {
-                if let Ok(w) = w_str.parse::<usize>() {
-                    parts.push(format!("[{}:0]", w - 1));
-                } else {
-                    return Err(format!("Invalid width '{}' for port {}", w_str, port.name));
+        // 生成 ANSI-C 风格的端口列表
+        let port_decls: Vec<String> = module
+            .ports
+            .iter()
+            .map(|p| {
+                let mut parts: Vec<String> = Vec::new();
+                // 方向
+                parts.push(match p.direction {
+                    PortDir::Input => "input".to_string(),
+                    PortDir::Output => "output".to_string(),
+                    PortDir::Inout => "inout".to_string(),
+                });
+                // output reg 特殊处理
+                if p.direction == PortDir::Output && p.reg {
+                    parts.push("reg".to_string());
                 }
-            }
-            parts.push(port.name.clone());
-            lines.push(format!("    {};", parts.join(" ")));
-        }
+                // 宽度（如果有）
+                if let Some(w_str) = &p.width {
+                    if let Ok(w) = w_str.parse::<usize>() {
+                        parts.push(format!("[{}:0]", w - 1));
+                    } else {
+                        // 非数字宽度（如宏）保留原字符串
+                        parts.push(format!("[{}:0]", w_str));
+                    }
+                }
+                // 端口名
+                parts.push(p.name.clone());
+                parts.join(" ")
+            })
+            .collect();
 
+        let ports_line = if port_decls.is_empty() {
+            "();".to_string()
+        } else {
+            format!(
+                "(\n    {}\n);",
+                port_decls.join(",\n    ")
+            )
+        };
+        lines.push(format!("module {}{}", module.name, ports_line));
+
+        // wire 声明
         for wire in &module.wires {
-            let mut parts = vec!["wire".to_string()];
+            let mut parts: Vec<String> = vec!["wire".to_string()];
             if let Some(w_str) = &wire.width {
                 if let Ok(w) = w_str.parse::<usize>() {
                     parts.push(format!("[{}:0]", w - 1));
                 } else {
-                    // 如果宽度不是数字，可能是未展开的符号，报错
-                    return Err(format!(
-                        "Invalid width '{}' for signal {}",
-                        w_str, wire.name
-                    ));
+                    parts.push(format!("[{}:0]", w_str));
                 }
             }
             parts.push(wire.name.clone());
             lines.push(format!("    {};", parts.join(" ")));
         }
 
+        // reg 声明
         for reg in &module.regs {
-            let mut parts = vec!["reg".to_string()];
+            let mut parts: Vec<String> = vec!["reg".to_string()];
             if let Some(w_str) = &reg.width {
                 if let Ok(w) = w_str.parse::<usize>() {
                     parts.push(format!("[{}:0]", w - 1));
                 } else {
-                    // 若宽度不是数字（如宏未展开），直接使用原字符串
                     parts.push(format!("[{}:0]", w_str));
                 }
             }
@@ -89,7 +102,7 @@ impl VerilogBackend {
             ));
         }
 
-        // 进程
+        // 进程（always 块）
         for proc in &module.processes {
             lines.push(self.gen_process(proc)?);
         }

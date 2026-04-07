@@ -1,3 +1,4 @@
+use crate::error::{Diagnostic, Span};
 use crate::parser::SExpr;
 
 #[derive(Debug, Clone)]
@@ -50,7 +51,6 @@ pub enum Statement {
     BlockWrite(AssignTarget, Expr),
     NonBlockWrite(AssignTarget, Expr),
     If(Expr, Vec<Statement>, Vec<Statement>),
-    // 可扩展更多语句
 }
 
 #[derive(Debug, Clone)]
@@ -74,19 +74,19 @@ pub enum PortMap {
 
 #[derive(Debug, Clone)]
 pub enum AssignTarget {
-    Signal(String, Option<usize>), // 信号名，可选位索引
-    Slice(String, usize, usize),   // 切片 [high:low]
+    Signal(String, Option<usize>),
+    Slice(String, usize, usize),
 }
 
 #[derive(Debug, Clone)]
 pub enum Expr {
-    Literal(String),                // 数字字面量
-    Ident(String),                  // 信号名
-    Slice(Box<Expr>, usize, usize), // 位选或切片
+    Literal(String),
+    Ident(String),
+    Slice(Box<Expr>, usize, usize),
     Concat(Vec<Expr>),
     UnaryOp(UnaryOp, Box<Expr>),
     BinaryOp(BinaryOp, Box<Expr>, Box<Expr>),
-    Cond(Box<Expr>, Box<Expr>, Box<Expr>), // cond ? then : else
+    Cond(Box<Expr>, Box<Expr>, Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -96,76 +96,75 @@ pub enum UnaryOp {
 
 #[derive(Debug, Clone)]
 pub enum BinaryOp {
-    And, Or, Xor,
-    Add, Sub, Mul,
-    Eq, Ne, Lt, Le, Gt, Ge,
-    Shl, Shr,
+    And,
+    Or,
+    Xor,
+    Add,
+    Sub,
+    Mul,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Shl,
+    Shr,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Span {
-    pub start: usize,
-    pub end: usize,
-    pub line: usize,
-    pub column: usize,
-}
-
-#[derive(Debug)]
-pub struct Diagnostic {
-    pub message: String,
-    pub file: String,
-    pub span: Span,
-}
-
-impl Diagnostic {
-    pub fn display(&self, source: &str) {
-        let lines: Vec<&str> = source.lines().collect();
-        let line_content = lines.get(self.span.line - 1).unwrap_or(&"");
-        println!("error: {}", self.message);
-        println!(" --> {}:{}:{}", self.file, self.span.line, self.span.column);
-        println!(" |");
-        println!("{} | {}", self.span.line, line_content);
-        let mut indicator = String::new();
-        for _ in 0..(self.span.column - 1) {
-            indicator.push(' ');
-        }
-        indicator.push('^');
-        println!(
-            "{} | {}",
-            " ".repeat(self.span.line.to_string().len()),
-            indicator
-        );
-    }
-}
-
-// 从 S‑表达式构建 Module
-pub fn parse_modules(sexprs: Vec<SExpr>) -> Result<Vec<Module>, String> {
+// 从 S‑表达式构建 Module（带位置信息）
+pub fn parse_modules(sexprs: Vec<SExpr>, file_name: &str) -> Result<Vec<Module>, Diagnostic> {
     let mut modules = Vec::new();
     for sexpr in sexprs {
-        if let SExpr::List(list) = sexpr {
-            if let Some(SExpr::Atom(first)) = list.first() {
-                if first == "module" {
-                    modules.push(parse_module(list)?);
+        match sexpr {
+            SExpr::List(list, span) => {
+                if let Some(SExpr::Atom(first, _)) = list.first() {
+                    if first == "module" {
+                        modules.push(parse_module(list, span, file_name)?);
+                    } else {
+                        return Err(Diagnostic::new(
+                            format!("Unexpected top-level form: {}", first),
+                            file_name.to_string(),
+                            span,
+                        ));
+                    }
                 } else {
-                    return Err(format!("Unexpected top-level form: {}", first));
+                    return Err(Diagnostic::new(
+                        "Expected module definition".to_string(),
+                        file_name.to_string(),
+                        span,
+                    ));
                 }
-            } else {
-                return Err("Expected module definition".to_string());
             }
-        } else {
-            return Err("Expected list at top level".to_string());
+            SExpr::Atom(_, span) => {
+                return Err(Diagnostic::new(
+                    "Expected list at top level".to_string(),
+                    file_name.to_string(),
+                    span,
+                ));
+            }
         }
     }
     Ok(modules)
 }
 
-fn parse_module(list: Vec<SExpr>) -> Result<Module, String> {
+fn parse_module(list: Vec<SExpr>, span: Span, file_name: &str) -> Result<Module, Diagnostic> {
     if list.len() < 3 {
-        return Err("Invalid module definition".to_string());
+        return Err(Diagnostic::new(
+            "Invalid module definition: too few elements".to_string(),
+            file_name.to_string(),
+            span,
+        ));
     }
     let name = match &list[1] {
-        SExpr::Atom(s) => s.clone(),
-        _ => return Err("Module name must be an atom".to_string()),
+        SExpr::Atom(s, _) => s.clone(),
+        _ => {
+            return Err(Diagnostic::new(
+                "Module name must be an atom".to_string(),
+                file_name.to_string(),
+                span,
+            ));
+        }
     };
     let mut ports = Vec::new();
     let mut wires = Vec::new();
@@ -176,24 +175,42 @@ fn parse_module(list: Vec<SExpr>) -> Result<Module, String> {
 
     for form in &list[2..] {
         match form {
-            SExpr::List(items) => {
+            SExpr::List(items, item_span) => {
                 if items.is_empty() {
                     continue;
                 }
                 match &items[0] {
-                    SExpr::Atom(s) => match s.as_str() {
-                        "ports" => ports = parse_ports(items)?,
-                        "wire" => wires.push(parse_signal(items)?),
-                        "reg" => regs.push(parse_signal(items)?),
-                        "process" => processes.push(parse_process(items)?),
-                        "assign" => assigns.push(parse_assign(items)?),
-                        "instance" => instances.push(parse_instance(items)?),
-                        _ => return Err(format!("Unknown form: {}", s)),
+                    SExpr::Atom(s, _) => match s.as_str() {
+                        "ports" => ports = parse_ports(items, *item_span, file_name)?,
+                        "wire" => wires.push(parse_signal(items, *item_span, file_name)?),
+                        "reg" => regs.push(parse_signal(items, *item_span, file_name)?),
+                        "process" => processes.push(parse_process(items, *item_span, file_name)?),
+                        "assign" => assigns.push(parse_assign(items, *item_span, file_name)?),
+                        "instance" => instances.push(parse_instance(items, *item_span, file_name)?),
+                        _ => {
+                            return Err(Diagnostic::new(
+                                format!("Unknown form: {}", s),
+                                file_name.to_string(),
+                                *item_span,
+                            ));
+                        }
                     },
-                    _ => return Err("Expected keyword".to_string()),
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "Expected keyword".to_string(),
+                            file_name.to_string(),
+                            *item_span,
+                        ));
+                    }
                 }
             }
-            _ => return Err("Expected list form".to_string()),
+            SExpr::Atom(_, atom_span) => {
+                return Err(Diagnostic::new(
+                    "Expected list form".to_string(),
+                    file_name.to_string(),
+                    *atom_span,
+                ));
+            }
         }
     }
     Ok(Module {
@@ -207,9 +224,13 @@ fn parse_module(list: Vec<SExpr>) -> Result<Module, String> {
     })
 }
 
-fn parse_port(p: &[SExpr]) -> Result<Vec<Port>, String> {
+fn parse_port(p: &[SExpr], span: Span, file_name: &str) -> Result<Vec<Port>, Diagnostic> {
     if p.len() < 2 {
-        return Err("Invalid port declaration".to_string());
+        return Err(Diagnostic::new(
+            "Invalid port declaration".to_string(),
+            file_name.to_string(),
+            span,
+        ));
     }
     let mut direction = PortDir::Input;
     let mut reg = false;
@@ -218,47 +239,78 @@ fn parse_port(p: &[SExpr]) -> Result<Vec<Port>, String> {
 
     // 方向关键字
     match &p[0] {
-        SExpr::Atom(s) => match s.as_str() {
+        SExpr::Atom(s, _) => match s.as_str() {
             "input" => direction = PortDir::Input,
             "output" => direction = PortDir::Output,
             "inout" => direction = PortDir::Inout,
-            _ => return Err(format!("Unknown port direction: {}", s)),
+            _ => {
+                return Err(Diagnostic::new(
+                    format!("Unknown port direction: {}", s),
+                    file_name.to_string(),
+                    span,
+                ));
+            }
         },
-        _ => return Err("Expected direction keyword".to_string()),
+        _ => {
+            return Err(Diagnostic::new(
+                "Expected direction keyword".to_string(),
+                file_name.to_string(),
+                span,
+            ));
+        }
     }
 
     // 跳过方向，处理 reg 和端口名
     let mut iter = p[1..].iter();
     if let Some(next) = iter.next() {
         match next {
-            SExpr::Atom(s) if s == "reg" => {
+            SExpr::Atom(s, _) if s == "reg" => {
                 reg = true;
-                // 后续所有原子都是端口名（最后一个可能是宽度）
                 for token in iter {
-                    if let SExpr::Atom(name) = token {
-                        names.push(name.clone());
-                    } else {
-                        return Err("Expected port name".to_string());
+                    match token {
+                        SExpr::Atom(name, _) => names.push(name.clone()),
+                        _ => {
+                            return Err(Diagnostic::new(
+                                "Expected port name".to_string(),
+                                file_name.to_string(),
+                                span,
+                            ));
+                        }
                     }
                 }
             }
-            SExpr::Atom(s) => {
+            SExpr::Atom(s, _) => {
                 names.push(s.clone());
                 for token in iter {
-                    if let SExpr::Atom(name) = token {
-                        names.push(name.clone());
-                    } else {
-                        return Err("Expected port name".to_string());
+                    match token {
+                        SExpr::Atom(name, _) => names.push(name.clone()),
+                        _ => {
+                            return Err(Diagnostic::new(
+                                "Expected port name".to_string(),
+                                file_name.to_string(),
+                                span,
+                            ));
+                        }
                     }
                 }
             }
-            _ => return Err("Expected port name".to_string()),
+            _ => {
+                return Err(Diagnostic::new(
+                    "Expected port name".to_string(),
+                    file_name.to_string(),
+                    span,
+                ));
+            }
         }
     } else {
-        return Err("Missing port name".to_string());
+        return Err(Diagnostic::new(
+            "Missing port name".to_string(),
+            file_name.to_string(),
+            span,
+        ));
     }
 
-    // 检查最后一个名称是否为宽度（数字或包含 ' 的宽度字面量）
+    // 检查最后一个名称是否为宽度
     if let Some(last) = names.last() {
         if last.chars().next().map_or(false, |c| c.is_ascii_digit()) || last.contains('\'') {
             width = Some(last.clone());
@@ -266,7 +318,6 @@ fn parse_port(p: &[SExpr]) -> Result<Vec<Port>, String> {
         }
     }
 
-    // 为每个名称生成一个端口
     let mut ports = Vec::new();
     for name in names {
         ports.push(Port {
@@ -279,46 +330,60 @@ fn parse_port(p: &[SExpr]) -> Result<Vec<Port>, String> {
     Ok(ports)
 }
 
-// 辅助函数：递归收集所有端口声明
-fn collect_ports(sexprs: &[SExpr]) -> Result<Vec<Port>, String> {
+fn collect_ports(sexprs: &[SExpr], file_name: &str) -> Result<Vec<Port>, Diagnostic> {
     let mut ports = Vec::new();
     for sexpr in sexprs {
         match sexpr {
-            SExpr::List(p) => {
-                if let Some(SExpr::Atom(first)) = p.first() {
+            SExpr::List(p, sub_span) => {
+                if let Some(SExpr::Atom(first, _)) = p.first() {
                     if matches!(first.as_str(), "input" | "output" | "inout") {
-                        let new_ports = parse_port(p)?;
+                        let new_ports = parse_port(p, *sub_span, file_name)?;
                         ports.extend(new_ports);
                     } else {
-                        ports.extend(collect_ports(p)?);
+                        ports.extend(collect_ports(p, file_name)?);
                     }
                 } else {
-                    ports.extend(collect_ports(p)?);
+                    ports.extend(collect_ports(p, file_name)?);
                 }
             }
-            SExpr::Atom(_) => {}
+            SExpr::Atom(_, _) => {}
         }
     }
     Ok(ports)
 }
 
-fn parse_ports(items: &[SExpr]) -> Result<Vec<Port>, String> {
-    // items 是 (ports ...) 列表，第一个元素是 "ports"，所以从索引 1 开始处理
-    collect_ports(&items[1..])
+fn parse_ports(items: &[SExpr], span: Span, file_name: &str) -> Result<Vec<Port>, Diagnostic> {
+    collect_ports(&items[1..], file_name)
 }
 
-fn parse_signal(items: &[SExpr]) -> Result<Signal, String> {
+fn parse_signal(items: &[SExpr], span: Span, file_name: &str) -> Result<Signal, Diagnostic> {
     if items.len() < 2 {
-        return Err("Missing signal name".to_string());
+        return Err(Diagnostic::new(
+            "Missing signal name".to_string(),
+            file_name.to_string(),
+            span,
+        ));
     }
     let name = match &items[1] {
-        SExpr::Atom(s) => s.clone(),
-        _ => return Err("Signal name must be atom".to_string()),
+        SExpr::Atom(s, _) => s.clone(),
+        _ => {
+            return Err(Diagnostic::new(
+                "Signal name must be atom".to_string(),
+                file_name.to_string(),
+                span,
+            ));
+        }
     };
     let width = if items.len() >= 3 {
         match &items[2] {
-            SExpr::Atom(s) => Some(s.clone()), // 存储为字符串
-            _ => return Err("Width must be atom".to_string()),
+            SExpr::Atom(s, _) => Some(s.clone()),
+            _ => {
+                return Err(Diagnostic::new(
+                    "Width must be atom".to_string(),
+                    file_name.to_string(),
+                    span,
+                ));
+            }
         }
     } else {
         None
@@ -326,21 +391,24 @@ fn parse_signal(items: &[SExpr]) -> Result<Signal, String> {
     Ok(Signal { name, width })
 }
 
-fn parse_process(items: &[SExpr]) -> Result<Process, String> {
+fn parse_process(items: &[SExpr], span: Span, file_name: &str) -> Result<Process, Diagnostic> {
     if items.len() < 3 {
-        return Err("Invalid process".to_string());
+        return Err(Diagnostic::new(
+            "Invalid process".to_string(),
+            file_name.to_string(),
+            span,
+        ));
     }
-    let sensitivity = parse_sensitivity(&items[1])?;
-    let body = parse_statements(&items[2..])?;
+    let sensitivity = parse_sensitivity(&items[1], file_name)?;
+    let body = parse_statements(&items[2..], file_name)?;
     Ok(Process { sensitivity, body })
 }
 
-fn parse_sensitivity(sexpr: &SExpr) -> Result<Vec<Sensitivity>, String> {
+fn parse_sensitivity(sexpr: &SExpr, file_name: &str) -> Result<Vec<Sensitivity>, Diagnostic> {
     match sexpr {
-        SExpr::List(list) => {
+        SExpr::List(list, span) => {
             let mut sens = Vec::new();
-            // 如果第一个元素是 "or"，则跳过它，处理剩余部分
-            let items = if let Some(SExpr::Atom(first)) = list.first() {
+            let items = if let Some(SExpr::Atom(first, _)) = list.first() {
                 if first == "or" {
                     &list[1..]
                 } else {
@@ -351,114 +419,182 @@ fn parse_sensitivity(sexpr: &SExpr) -> Result<Vec<Sensitivity>, String> {
             };
             for item in items {
                 match item {
-                    SExpr::List(sublist) => {
+                    SExpr::List(sublist, sub_span) => {
                         if sublist.len() != 2 {
-                            return Err("Invalid sensitivity event".to_string());
+                            return Err(Diagnostic::new(
+                                "Invalid sensitivity event".to_string(),
+                                file_name.to_string(),
+                                *sub_span,
+                            ));
                         }
                         match &sublist[0] {
-                            SExpr::Atom(s) => match s.as_str() {
+                            SExpr::Atom(s, _) => match s.as_str() {
                                 "posedge" => {
-                                    if let SExpr::Atom(sig) = &sublist[1] {
+                                    if let SExpr::Atom(sig, _) = &sublist[1] {
                                         sens.push(Sensitivity::PosEdge(sig.clone()));
                                     } else {
-                                        return Err("Expected signal name".to_string());
+                                        return Err(Diagnostic::new(
+                                            "Expected signal name".to_string(),
+                                            file_name.to_string(),
+                                            *sub_span,
+                                        ));
                                     }
                                 }
                                 "negedge" => {
-                                    if let SExpr::Atom(sig) = &sublist[1] {
+                                    if let SExpr::Atom(sig, _) = &sublist[1] {
                                         sens.push(Sensitivity::NegEdge(sig.clone()));
                                     } else {
-                                        return Err("Expected signal name".to_string());
+                                        return Err(Diagnostic::new(
+                                            "Expected signal name".to_string(),
+                                            file_name.to_string(),
+                                            *sub_span,
+                                        ));
                                     }
                                 }
-                                _ => return Err(format!("Unknown event type: {}", s)),
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        format!("Unknown event type: {}", s),
+                                        file_name.to_string(),
+                                        *sub_span,
+                                    ));
+                                }
                             },
-                            _ => return Err("Expected event type".to_string()),
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "Expected event type".to_string(),
+                                    file_name.to_string(),
+                                    *sub_span,
+                                ));
+                            }
                         }
                     }
-                    SExpr::Atom(sig) => {
+                    SExpr::Atom(sig, atom_span) => {
                         sens.push(Sensitivity::Level(sig.clone()));
                     }
-                    _ => return Err("Invalid sensitivity item".to_string()),
                 }
             }
             Ok(sens)
         }
-        _ => Err("Sensitivity list must be a list".to_string()),
+        SExpr::Atom(_, span) => {
+            Err(Diagnostic::new(
+                "Sensitivity list must be a list".to_string(),
+                file_name.to_string(),
+                *span,
+            ))
+        }
     }
 }
 
-fn parse_statements(sexprs: &[SExpr]) -> Result<Vec<Statement>, String> {
+fn parse_statements(sexprs: &[SExpr], file_name: &str) -> Result<Vec<Statement>, Diagnostic> {
     let mut stmts = Vec::new();
     for sexpr in sexprs {
         match sexpr {
-            SExpr::List(list) => {
+            SExpr::List(list, span) => {
                 if list.is_empty() {
                     continue;
                 }
                 match &list[0] {
-                    SExpr::Atom(s) => match s.as_str() {
+                    SExpr::Atom(s, _) => match s.as_str() {
                         "block-write" => {
                             if list.len() != 3 {
-                                return Err("Invalid block-write".to_string());
+                                return Err(Diagnostic::new(
+                                    "Invalid block-write".to_string(),
+                                    file_name.to_string(),
+                                    *span,
+                                ));
                             }
-                            let target = parse_assign_target(&list[1])?;
-                            let expr = parse_expr(&list[2])?;
+                            let target = parse_assign_target(&list[1], file_name)?;
+                            let expr = parse_expr(&list[2], file_name)?;
                             stmts.push(Statement::BlockWrite(target, expr));
                         }
                         "nb-write" => {
                             if list.len() != 3 {
-                                return Err("Invalid nb-write".to_string());
+                                return Err(Diagnostic::new(
+                                    "Invalid nb-write".to_string(),
+                                    file_name.to_string(),
+                                    *span,
+                                ));
                             }
-                            let target = parse_assign_target(&list[1])?;
-                            let expr = parse_expr(&list[2])?;
+                            let target = parse_assign_target(&list[1], file_name)?;
+                            let expr = parse_expr(&list[2], file_name)?;
                             stmts.push(Statement::NonBlockWrite(target, expr));
                         }
                         "if" => {
                             if list.len() < 3 {
-                                return Err("Invalid if statement".to_string());
+                                return Err(Diagnostic::new(
+                                    "Invalid if statement".to_string(),
+                                    file_name.to_string(),
+                                    *span,
+                                ));
                             }
-                            let cond = parse_expr(&list[1])?;
-                            // then 分支（第二个元素）
-                            let then_stmt = parse_statements(&[list[2].clone()])?;
+                            let cond = parse_expr(&list[1], file_name)?;
+                            let then_stmt = parse_statements(&[list[2].clone()], file_name)?;
                             let else_stmt = if list.len() >= 4 {
-                                // else 分支（第三个元素）
-                                parse_statements(&[list[3].clone()])?
+                                parse_statements(&[list[3].clone()], file_name)?
                             } else {
                                 vec![]
                             };
                             stmts.push(Statement::If(cond, then_stmt, else_stmt));
                         }
                         "begin" => {
-                            // 将 begin 块内的语句展开
-                            let inner_stmts = parse_statements(&list[1..])?;
+                            let inner_stmts = parse_statements(&list[1..], file_name)?;
                             stmts.extend(inner_stmts);
                         }
-                        _ => return Err(format!("Unknown statement: {}", s)),
+                        _ => {
+                            return Err(Diagnostic::new(
+                                format!("Unknown statement: {}", s),
+                                file_name.to_string(),
+                                *span,
+                            ));
+                        }
                     },
-                    _ => return Err("Expected statement keyword".to_string()),
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "Expected statement keyword".to_string(),
+                            file_name.to_string(),
+                            *span,
+                        ));
+                    }
                 }
             }
-            _ => return Err("Statement must be a list".to_string()),
+            SExpr::Atom(_, span) => {
+                return Err(Diagnostic::new(
+                    "Statement must be a list".to_string(),
+                    file_name.to_string(),
+                    *span,
+                ));
+            }
         }
     }
     Ok(stmts)
 }
 
-fn parse_assign_target(sexpr: &SExpr) -> Result<AssignTarget, String> {
+fn parse_assign_target(sexpr: &SExpr, file_name: &str) -> Result<AssignTarget, Diagnostic> {
     match sexpr {
-        SExpr::List(list) => {
+        SExpr::List(list, span) => {
             if list.len() >= 2 {
                 match &list[0] {
-                    SExpr::Atom(s) if s == "signal" => {
+                    SExpr::Atom(s, _) if s == "signal" => {
                         let name = match &list[1] {
-                            SExpr::Atom(n) => n.clone(),
-                            _ => return Err("Expected signal name".to_string()),
+                            SExpr::Atom(n, _) => n.clone(),
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "Expected signal name".to_string(),
+                                    file_name.to_string(),
+                                    *span,
+                                ));
+                            }
                         };
                         let idx = if list.len() >= 3 {
                             match &list[2] {
-                                SExpr::Atom(n) => {
-                                    Some(n.parse::<usize>().map_err(|_| "Invalid index")?)
+                                SExpr::Atom(n, _) => {
+                                    Some(n.parse::<usize>().map_err(|_| {
+                                        Diagnostic::new(
+                                            "Invalid index".to_string(),
+                                            file_name.to_string(),
+                                            *span,
+                                        )
+                                    })?)
                                 }
                                 _ => None,
                             }
@@ -467,88 +603,162 @@ fn parse_assign_target(sexpr: &SExpr) -> Result<AssignTarget, String> {
                         };
                         Ok(AssignTarget::Signal(name, idx))
                     }
-                    SExpr::Atom(s) if s == "slice" => {
+                    SExpr::Atom(s, _) if s == "slice" => {
                         if list.len() != 4 {
-                            return Err("Invalid slice: (slice sig high low)".to_string());
+                            return Err(Diagnostic::new(
+                                "Invalid slice: (slice sig high low)".to_string(),
+                                file_name.to_string(),
+                                *span,
+                            ));
                         }
                         let name = match &list[1] {
-                            SExpr::Atom(n) => n.clone(),
-                            _ => return Err("Expected signal name".to_string()),
+                            SExpr::Atom(n, _) => n.clone(),
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "Expected signal name".to_string(),
+                                    file_name.to_string(),
+                                    *span,
+                                ));
+                            }
                         };
                         let high = match &list[2] {
-                            SExpr::Atom(n) => n.parse::<usize>().map_err(|_| "Invalid high")?,
-                            _ => return Err("Expected high index".to_string()),
+                            SExpr::Atom(n, _) => n.parse::<usize>().map_err(|_| {
+                                Diagnostic::new("Invalid high".to_string(), file_name.to_string(), *span)
+                            })?,
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "Expected high index".to_string(),
+                                    file_name.to_string(),
+                                    *span,
+                                ));
+                            }
                         };
                         let low = match &list[3] {
-                            SExpr::Atom(n) => n.parse::<usize>().map_err(|_| "Invalid low")?,
-                            _ => return Err("Expected low index".to_string()),
+                            SExpr::Atom(n, _) => n.parse::<usize>().map_err(|_| {
+                                Diagnostic::new("Invalid low".to_string(), file_name.to_string(), *span)
+                            })?,
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "Expected low index".to_string(),
+                                    file_name.to_string(),
+                                    *span,
+                                ));
+                            }
                         };
                         Ok(AssignTarget::Slice(name, high, low))
                     }
-                    _ => Err("Unknown assign target".to_string()),
+                    _ => {
+                        Err(Diagnostic::new(
+                            "Unknown assign target".to_string(),
+                            file_name.to_string(),
+                            *span,
+                        ))
+                    }
                 }
             } else {
-                Err("Invalid assign target".to_string())
+                Err(Diagnostic::new(
+                    "Invalid assign target".to_string(),
+                    file_name.to_string(),
+                    *span,
+                ))
             }
         }
-        SExpr::Atom(s) => Ok(AssignTarget::Signal(s.clone(), None)),
-        _ => Err("Invalid assign target".to_string()),
+        SExpr::Atom(s, span) => Ok(AssignTarget::Signal(s.clone(), None)),
     }
 }
 
-fn parse_expr(sexpr: &SExpr) -> Result<Expr, String> {
+fn parse_expr(sexpr: &SExpr, file_name: &str) -> Result<Expr, Diagnostic> {
     match sexpr {
-        SExpr::Atom(s) => {
-            // 尝试解析为数字字面量，否则为标识符
+        SExpr::Atom(s, _span) => {
             if s.chars().next().map_or(false, |c| c.is_ascii_digit()) || s.contains('\'') {
                 Ok(Expr::Literal(s.clone()))
             } else {
                 Ok(Expr::Ident(s.clone()))
             }
         }
-        SExpr::List(list) => {
+        SExpr::List(list, span) => {
             if list.is_empty() {
-                return Err("Empty expression".to_string());
+                return Err(Diagnostic::new(
+                    "Empty expression".to_string(),
+                    file_name.to_string(),
+                    *span,
+                ));
             }
             match &list[0] {
-                SExpr::Atom(op) => {
+                SExpr::Atom(op, _) => {
                     match op.as_str() {
                         "slice" => {
                             if list.len() != 4 {
-                                return Err("Invalid slice expression".to_string());
+                                return Err(Diagnostic::new(
+                                    "Invalid slice expression".to_string(),
+                                    file_name.to_string(),
+                                    *span,
+                                ));
                             }
-                            let expr = parse_expr(&list[1])?;
+                            let expr = parse_expr(&list[1], file_name)?;
                             let high = match &list[2] {
-                                SExpr::Atom(n) => n.parse::<usize>().map_err(|_| "Invalid high")?,
-                                _ => return Err("Expected high index".to_string()),
+                                SExpr::Atom(n, _) => n.parse::<usize>().map_err(|_| {
+                                    Diagnostic::new("Invalid high".to_string(), file_name.to_string(), *span)
+                                })?,
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        "Expected high index".to_string(),
+                                        file_name.to_string(),
+                                        *span,
+                                    ));
+                                }
                             };
                             let low = match &list[3] {
-                                SExpr::Atom(n) => n.parse::<usize>().map_err(|_| "Invalid low")?,
-                                _ => return Err("Expected low index".to_string()),
+                                SExpr::Atom(n, _) => n.parse::<usize>().map_err(|_| {
+                                    Diagnostic::new("Invalid low".to_string(), file_name.to_string(), *span)
+                                })?,
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        "Expected low index".to_string(),
+                                        file_name.to_string(),
+                                        *span,
+                                    ));
+                                }
                             };
                             Ok(Expr::Slice(Box::new(expr), high, low))
                         }
                         "concat" => {
                             let mut exprs = Vec::new();
                             for e in &list[1..] {
-                                exprs.push(parse_expr(e)?);
+                                exprs.push(parse_expr(e, file_name)?);
                             }
                             Ok(Expr::Concat(exprs))
                         }
                         "signal" => {
                             if list.len() < 2 {
-                                return Err("signal requires at least a name".to_string());
+                                return Err(Diagnostic::new(
+                                    "signal requires at least a name".to_string(),
+                                    file_name.to_string(),
+                                    *span,
+                                ));
                             }
                             let name = match &list[1] {
-                                SExpr::Atom(s) => s.clone(),
-                                _ => return Err("signal name must be an atom".to_string()),
+                                SExpr::Atom(s, _) => s.clone(),
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        "signal name must be an atom".to_string(),
+                                        file_name.to_string(),
+                                        *span,
+                                    ));
+                                }
                             };
                             if list.len() >= 3 {
                                 let idx = match &list[2] {
-                                    SExpr::Atom(s) => {
-                                        s.parse::<usize>().map_err(|_| "Invalid index")?
+                                    SExpr::Atom(s, _) => s.parse::<usize>().map_err(|_| {
+                                        Diagnostic::new("Invalid index".to_string(), file_name.to_string(), *span)
+                                    })?,
+                                    _ => {
+                                        return Err(Diagnostic::new(
+                                            "index must be a number".to_string(),
+                                            file_name.to_string(),
+                                            *span,
+                                        ));
                                     }
-                                    _ => return Err("index must be a number".to_string()),
                                 };
                                 Ok(Expr::Slice(Box::new(Expr::Ident(name)), idx, idx))
                             } else {
@@ -557,14 +767,22 @@ fn parse_expr(sexpr: &SExpr) -> Result<Expr, String> {
                         }
                         "not" => {
                             if list.len() != 2 {
-                                return Err("not requires one argument".to_string());
+                                return Err(Diagnostic::new(
+                                    "not requires one argument".to_string(),
+                                    file_name.to_string(),
+                                    *span,
+                                ));
                             }
-                            Ok(Expr::UnaryOp(UnaryOp::Not, Box::new(parse_expr(&list[1])?)))
+                            Ok(Expr::UnaryOp(UnaryOp::Not, Box::new(parse_expr(&list[1], file_name)?)))
                         }
                         "and" | "or" | "xor" | "+" | "-" | "*" | "==" | "!=" | ">" | "<" | ">="
                         | "<=" | "<<" | ">>" => {
                             if list.len() != 3 {
-                                return Err("Binary operator requires two arguments".to_string());
+                                return Err(Diagnostic::new(
+                                    "Binary operator requires two arguments".to_string(),
+                                    file_name.to_string(),
+                                    *span,
+                                ));
                             }
                             let op = match op.as_str() {
                                 "and" => BinaryOp::And,
@@ -585,29 +803,43 @@ fn parse_expr(sexpr: &SExpr) -> Result<Expr, String> {
                             };
                             Ok(Expr::BinaryOp(
                                 op,
-                                Box::new(parse_expr(&list[1])?),
-                                Box::new(parse_expr(&list[2])?),
+                                Box::new(parse_expr(&list[1], file_name)?),
+                                Box::new(parse_expr(&list[2], file_name)?),
                             ))
                         }
                         "cond" => {
-                            // (cond (condition then) (else else_expr))
                             if list.len() != 3 {
-                                return Err("cond requires two branches".to_string());
+                                return Err(Diagnostic::new(
+                                    "cond requires two branches".to_string(),
+                                    file_name.to_string(),
+                                    *span,
+                                ));
                             }
                             let cond_branch = match &list[1] {
-                                SExpr::List(l) if l.len() == 2 => {
-                                    (parse_expr(&l[0])?, parse_expr(&l[1])?)
+                                SExpr::List(l, sub_span) if l.len() == 2 => {
+                                    (parse_expr(&l[0], file_name)?, parse_expr(&l[1], file_name)?)
                                 }
-                                _ => return Err("Invalid condition branch".to_string()),
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        "Invalid condition branch".to_string(),
+                                        file_name.to_string(),
+                                        *span,
+                                    ));
+                                }
                             };
                             let else_branch = match &list[2] {
-                                SExpr::List(l)
-                                    if l.len() == 2
-                                        && matches!(&l[0], SExpr::Atom(s) if s == "else") =>
-                                {
-                                    parse_expr(&l[1])?
+                                SExpr::List(l, sub_span)
+                                if l.len() == 2 && matches!(&l[0], SExpr::Atom(s, _) if s == "else") =>
+                                    {
+                                        parse_expr(&l[1], file_name)?
+                                    }
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        "Invalid else branch".to_string(),
+                                        file_name.to_string(),
+                                        *span,
+                                    ));
                                 }
-                                _ => return Err("Invalid else branch".to_string()),
                             };
                             Ok(Expr::Cond(
                                 Box::new(cond_branch.0),
@@ -616,45 +848,72 @@ fn parse_expr(sexpr: &SExpr) -> Result<Expr, String> {
                             ))
                         }
                         _ => {
-                            // 函数调用？暂时不支持，当作标识符处理
-                            // 但这里可能是子表达式
-                            Err(format!("Unknown operator: {}", op))
+                            Err(Diagnostic::new(
+                                format!("Unknown operator: {}", op),
+                                file_name.to_string(),
+                                *span,
+                            ))
                         }
                     }
                 }
-                _ => Err("Expected operator".to_string()),
+                _ => {
+                    Err(Diagnostic::new(
+                        "Expected operator".to_string(),
+                        file_name.to_string(),
+                        *span,
+                    ))
+                }
             }
         }
     }
 }
 
-fn parse_assign(items: &[SExpr]) -> Result<Assign, String> {
+fn parse_assign(items: &[SExpr], span: Span, file_name: &str) -> Result<Assign, Diagnostic> {
     if items.len() != 3 {
-        return Err("Invalid assign".to_string());
+        return Err(Diagnostic::new(
+            "Invalid assign".to_string(),
+            file_name.to_string(),
+            span,
+        ));
     }
-    let target = parse_assign_target(&items[1])?;
-    let expr = parse_expr(&items[2])?;
+    let target = parse_assign_target(&items[1], file_name)?;
+    let expr = parse_expr(&items[2], file_name)?;
     Ok(Assign { target, expr })
 }
 
-fn parse_instance(items: &[SExpr]) -> Result<Instance, String> {
+fn parse_instance(items: &[SExpr], span: Span, file_name: &str) -> Result<Instance, Diagnostic> {
     if items.len() < 4 {
-        return Err("Invalid instance".to_string());
+        return Err(Diagnostic::new(
+            "Invalid instance".to_string(),
+            file_name.to_string(),
+            span,
+        ));
     }
     let module_name = match &items[1] {
-        SExpr::Atom(s) => s.clone(),
-        _ => return Err("Module name must be atom".to_string()),
+        SExpr::Atom(s, _) => s.clone(),
+        _ => {
+            return Err(Diagnostic::new(
+                "Module name must be atom".to_string(),
+                file_name.to_string(),
+                span,
+            ));
+        }
     };
     let instance_name = match &items[2] {
-        SExpr::Atom(s) => s.clone(),
-        _ => return Err("Instance name must be atom".to_string()),
+        SExpr::Atom(s, _) => s.clone(),
+        _ => {
+            return Err(Diagnostic::new(
+                "Instance name must be atom".to_string(),
+                file_name.to_string(),
+                span,
+            ));
+        }
     };
     let port_map = match &items[3] {
-        SExpr::List(list) => {
-            // 如果列表非空且第一个元素是 port-map，则跳过该关键字
+        SExpr::List(list, _) => {
             let map_items = if !list.is_empty() {
                 match &list[0] {
-                    SExpr::Atom(s) if s == "port-map" => &list[1..],
+                    SExpr::Atom(s, _) if s == "port-map" => &list[1..],
                     _ => list.as_slice(),
                 }
             } else {
@@ -663,23 +922,45 @@ fn parse_instance(items: &[SExpr]) -> Result<Instance, String> {
             let mut by_name = Vec::new();
             for mapping in map_items {
                 match mapping {
-                    SExpr::List(m) => {
+                    SExpr::List(m, sub_span) => {
                         if m.len() != 2 {
-                            return Err("Invalid port mapping".to_string());
+                            return Err(Diagnostic::new(
+                                "Invalid port mapping".to_string(),
+                                file_name.to_string(),
+                                *sub_span,
+                            ));
                         }
                         let port = match &m[0] {
-                            SExpr::Atom(s) => s.clone(),
-                            _ => return Err("Port name must be atom".to_string()),
+                            SExpr::Atom(s, _) => s.clone(),
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "Port name must be atom".to_string(),
+                                    file_name.to_string(),
+                                    *sub_span,
+                                ));
+                            }
                         };
-                        let expr = parse_expr(&m[1])?;
+                        let expr = parse_expr(&m[1], file_name)?;
                         by_name.push((port, expr));
                     }
-                    _ => return Err("Port map must be list of pairs".to_string()),
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "Port map must be list of pairs".to_string(),
+                            file_name.to_string(),
+                            span,
+                        ));
+                    }
                 }
             }
             PortMap::ByName(by_name)
         }
-        _ => return Err("Port map must be a list".to_string()),
+        _ => {
+            return Err(Diagnostic::new(
+                "Port map must be a list".to_string(),
+                file_name.to_string(),
+                span,
+            ));
+        }
     };
     Ok(Instance {
         module_name,

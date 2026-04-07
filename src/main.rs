@@ -4,6 +4,7 @@ use std::time::Instant;
 
 mod ast;
 mod backend;
+mod error;
 mod lexer;
 mod macro_expander;
 mod parser;
@@ -13,64 +14,77 @@ pub mod vhdl_backend;
 
 use backend::Backend;
 use verilog_backend::VerilogBackend;
-use vhdl_backend::VhdlBackend; // 引入 VhdlBackend
+use vhdl_backend::VhdlBackend;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let start_time = Instant::now();
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
-        // 更新了 usage 提示
         eprintln!("usage: halc <input.hal> [--vhdl]");
         std::process::exit(1);
     }
 
     let input_file = &args[1];
-
-    // 判断是否传入了 --vhdl 参数
     let use_vhdl = args.iter().any(|arg| arg == "--vhdl");
 
-    // 根据选择的 Backend 替换不同的文件后缀
     let output_file = if use_vhdl {
         input_file.replace(".hal", ".vhd")
     } else {
         input_file.replace(".hal", ".v")
     };
 
-    // 顶部摘要
     println!("halc: compiling '{}'", input_file);
 
-    // 步骤追踪（使用标准的缩进和进度标记）
-    println!("  [1/4] parsing s-expressions...");
+    let step_start = Instant::now();
+    print!("  [1/4] parsing s-expressions...");
     let source = fs::read_to_string(input_file)?;
-    let tokens = lexer::tokenize(&source)?;
-    let sexprs = parser::parse_sexprs(tokens)?;
+    let tokens = lexer::tokenize(&source, input_file).unwrap_or_else(|diag| {
+        diag.display(&source);
+        std::process::exit(2);
+    });
+    let sexprs = parser::parse_sexprs(tokens, input_file).unwrap_or_else(|diag| {
+        diag.display(&source);
+        std::process::exit(3);
+    });
+    println!(" done in {:.3} s", step_start.elapsed().as_secs_f64());
 
-    println!("  [2/4] expanding macros...");
-    let expanded = macro_expander::expand(sexprs)?;
+    let step_start = Instant::now();
+    print!("  [2/4] expanding macros...");
+    let expanded = macro_expander::expand(sexprs, input_file).unwrap_or_else(|diag| {
+        diag.display(&source);
+        std::process::exit(3);
+    });
+    println!(" done in {:.3} s", step_start.elapsed().as_secs_f64());
 
-    println!("  [3/4] analyzing semantics...");
-    let modules = ast::parse_modules(expanded)?;
+    let step_start = Instant::now();
+    print!("  [3/4] analyzing semantics...");
+    let modules = ast::parse_modules(expanded, input_file).unwrap_or_else(|diag| {
+        diag.display(&source);
+        std::process::exit(3);
+    });
     for module in &modules {
         semantic::check_module(module)?;
     }
+    println!(" done in {:.3} s", step_start.elapsed().as_secs_f64());
 
-    // 根据选择执行相应的 Backend 生成逻辑
+    let step_start = Instant::now();
     if use_vhdl {
-        println!("  [4/4] emitting vhdl...");
+        print!("  [4/4] emitting vhdl...");
         let backend = VhdlBackend::new();
         let output = backend.generate(&modules)?;
         fs::write(&output_file, output)?;
     } else {
-        println!("  [4/4] emitting verilog...");
+        print!("  [4/4] emitting verilog...");
         let backend = VerilogBackend::new();
         let output = backend.generate(&modules)?;
         fs::write(&output_file, output)?;
     }
+    println!(" done in {:.3} s", step_start.elapsed().as_secs_f64());
 
     // 底部总结
     let elapsed = start_time.elapsed();
-    println!("build complete: -> {} ({:?})", output_file, elapsed);
+    println!("build complete: -> {} ({:.3} s)", output_file, elapsed.as_secs_f64());
 
     Ok(())
 }
