@@ -1,10 +1,10 @@
 # HAL – Hardware Assembly Lisp
 
-**HAL** is a hardware description language that combines the expressive power of Lisp macros with the simplicity of S‑expressions. Write compact, parameterized hardware – the compiler expands your code at compile time and generates Verilog.
+**HAL** is a hardware description language that combines the expressive power of Lisp macros with the simplicity of S‑expressions. Write compact, parameterized hardware – the compiler expands your code at compile time and generates Verilog(or VHDL).
 
 - **Zero dependencies** – The Rust compiler (`halc`) has an empty `[dependencies]` section.
 - **Lisp‑style macros** – Use `expil!` and `!`-suffixed operators to generate hardware structures during compilation.
-- **Fast generation** – A 128×128 systolic array (16,384 PEs) expands in **0.48 seconds** and produces over **130k lines** of Verilog.
+- **Fast generation** – A 128×128 systolic array (16,384 PEs) expands in **0.48 seconds** and produces over **210k lines** of Verilog, or **220k lines** of VHDL.
 - **Pure Rust** – Hand‑written parser, macro expander, and code generator.
 
 ## Example
@@ -64,7 +64,7 @@ Define a macro to generate an `N×N` systolic array:
 (define-systolic-array my_systolic_128x128 128 8 16)
 ```
 
-Run the compiler and generate Verilog in milliseconds.
+Run the compiler and generate Verilog/VHDL in milliseconds.
 
 ## Getting Started
 
