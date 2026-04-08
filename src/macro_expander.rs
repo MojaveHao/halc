@@ -140,6 +140,7 @@ impl MacroContext {
             "add!" => self.builtin_add(args, bindings, span),
             "if!" => self.builtin_if(args, bindings, span),
             "eval!" => self.builtin_eval(args, bindings, span),
+            "let!" => self.builtin_let(args, bindings, span),
 
             // 算术与比较运算符（均以 ! 结尾）
             "+!" => {
@@ -376,6 +377,86 @@ impl MacroContext {
             result.push(expanded);
         }
         // 将结果拼接成一个列表
+        Ok(SExpr::List(result, span))
+    }
+
+    // let! ((var val) ...) body...
+    fn builtin_let(
+        &self,
+        args: &[SExpr],
+        bindings: Option<&HashMap<String, SExpr>>,
+        span: Span,
+    ) -> Result<SExpr, Diagnostic> {
+        if args.len() < 2 {
+            return Err(Diagnostic::new(
+                "let! expects at least 2 arguments: (let! bindings body ...)".to_string(),
+                self.file_name.clone(),
+                span,
+            ));
+        }
+
+        // 解析绑定列表
+        let bindings_list = match &args[0] {
+            SExpr::List(list, _) => list,
+            _ => {
+                return Err(Diagnostic::new(
+                    "let! first argument must be a list of bindings".to_string(),
+                    self.file_name.clone(),
+                    span,
+                ));
+            }
+        };
+
+        // 构造新的绑定环境（继承外部绑定）
+        let mut new_bindings = bindings.cloned().unwrap_or_default();
+        for binding in bindings_list {
+            let (var, val_expr) = match binding {
+                SExpr::List(inner, _) if inner.len() == 2 => {
+                    let var = match &inner[0] {
+                        SExpr::Atom(s, _) => s.clone(),
+                        _ => {
+                            return Err(Diagnostic::new(
+                                "let! binding variable must be an atom".to_string(),
+                                self.file_name.clone(),
+                                span,
+                            ));
+                        }
+                    };
+                    (var, &inner[1])
+                }
+                _ => {
+                    return Err(Diagnostic::new(
+                        "let! binding must be a list of (var expr)".to_string(),
+                        self.file_name.clone(),
+                        span,
+                    ));
+                }
+            };
+
+            // 在当前未添加新绑定的环境中求值 val_expr（不允许递归引用同层绑定）
+            // 注意：这里应该使用旧的 bindings 环境，防止 let 绑定之间互相引用。
+            let val = self.expand_sexpr(val_expr, bindings, span)?;
+            new_bindings.insert(var, val);
+        }
+
+        // 展开所有主体表达式（索引 1..）
+        let mut result = Vec::new();
+        for body_expr in &args[1..] {
+            let expanded = self.expand_sexpr(body_expr, Some(&new_bindings), span)?;
+            // 若展开结果是 (begin ...) 列表，则展平其内部
+            if let SExpr::List(inner, _) = &expanded {
+                if let Some(SExpr::Atom(first, _)) = inner.first() {
+                    if first == "begin" {
+                        for sub in &inner[1..] {
+                            result.push(sub.clone());
+                        }
+                        continue;
+                    }
+                }
+            }
+            result.push(expanded);
+        }
+
         Ok(SExpr::List(result, span))
     }
 

@@ -7,14 +7,34 @@ impl VerilogBackend {
     pub fn new() -> Self {
         VerilogBackend
     }
+
+    /// 将宽度字符串转换为 Verilog 向量范围（如 "8" -> "[7:0]"）
+    fn format_width(width: Option<&String>) -> String {
+        if let Some(w) = width {
+            if let Ok(n) = w.parse::<usize>() {
+                if n > 1 {
+                    format!("[{}:0]", n - 1)
+                } else {
+                    String::new()
+                }
+            } else {
+                // 非数字宽度（如参数化表达式）原样保留
+                format!("[{}:0]", w)
+            }
+        } else {
+            String::new()
+        }
+    }
 }
 
 impl Backend for VerilogBackend {
     fn generate(&self, modules: &[Module]) -> Result<String, String> {
         let mut output = String::new();
-        for module in modules {
+        for (i, module) in modules.iter().enumerate() {
+            if i > 0 {
+                output.push('\n');
+            }
             output.push_str(&self.gen_module(module)?);
-            output.push('\n');
         }
         Ok(output)
     }
@@ -24,82 +44,31 @@ impl VerilogBackend {
     fn gen_module(&self, module: &Module) -> Result<String, String> {
         let mut lines = Vec::new();
 
-        // 生成 ANSI-C 风格的端口列表
-        let port_decls: Vec<String> = module
-            .ports
-            .iter()
-            .map(|p| {
-                let mut parts: Vec<String> = Vec::new();
-                // 方向
-                parts.push(match p.direction {
-                    PortDir::Input => "input".to_string(),
-                    PortDir::Output => "output".to_string(),
-                    PortDir::Inout => "inout".to_string(),
-                });
-                // output reg 特殊处理
-                if p.direction == PortDir::Output && p.reg {
-                    parts.push("reg".to_string());
-                }
-                // 宽度（如果有）
-                if let Some(w_str) = &p.width {
-                    if let Ok(w) = w_str.parse::<usize>() {
-                        parts.push(format!("[{}:0]", w - 1));
-                    } else {
-                        // 非数字宽度（如宏）保留原字符串
-                        parts.push(format!("[{}:0]", w_str));
-                    }
-                }
-                // 端口名
-                parts.push(p.name.clone());
-                parts.join(" ")
-            })
-            .collect();
+        // 模块头部：端口列表 (ANSI-C 风格)
+        let port_list = self.gen_port_list(module);
+        lines.push(format!("module {} {}", module.name, port_list));
 
-        let ports_line = if port_decls.is_empty() {
-            "();".to_string()
-        } else {
-            format!(
-                "(\n    {}\n);",
-                port_decls.join(",\n    ")
-            )
-        };
-        lines.push(format!("module {}{}", module.name, ports_line));
-
-        // wire 声明
+        // Wire 声明
         for wire in &module.wires {
-            let mut parts: Vec<String> = vec!["wire".to_string()];
-            if let Some(w_str) = &wire.width {
-                if let Ok(w) = w_str.parse::<usize>() {
-                    parts.push(format!("[{}:0]", w - 1));
-                } else {
-                    parts.push(format!("[{}:0]", w_str));
-                }
-            }
-            parts.push(wire.name.clone());
-            lines.push(format!("    {};", parts.join(" ")));
+            let width_str = Self::format_width(wire.width.as_ref());
+            lines.push(format!("    wire{}{};",
+                               if width_str.is_empty() { " ".to_string() } else { format!(" {} ", width_str) },
+                               wire.name));
         }
 
-        // reg 声明
+        // Reg 声明（包括非端口 reg）
         for reg in &module.regs {
-            let mut parts: Vec<String> = vec!["reg".to_string()];
-            if let Some(w_str) = &reg.width {
-                if let Ok(w) = w_str.parse::<usize>() {
-                    parts.push(format!("[{}:0]", w - 1));
-                } else {
-                    parts.push(format!("[{}:0]", w_str));
-                }
-            }
-            parts.push(reg.name.clone());
-            lines.push(format!("    {};", parts.join(" ")));
+            let width_str = Self::format_width(reg.width.as_ref());
+            lines.push(format!("    reg{}{};",
+                               if width_str.is_empty() { " ".to_string() } else { format!(" {} ", width_str) },
+                               reg.name));
         }
 
         // 连续赋值
         for assign in &module.assigns {
-            lines.push(format!(
-                "    assign {} = {};",
-                self.gen_assign_target(&assign.target),
-                self.gen_expr(&assign.expr)
-            ));
+            lines.push(format!("    assign {} = {};",
+                               self.gen_assign_target(&assign.target),
+                               self.gen_expr(&assign.expr)));
         }
 
         // 进程（always 块）
@@ -116,11 +85,57 @@ impl VerilogBackend {
         Ok(lines.join("\n"))
     }
 
+    /// 生成 ANSI-C 风格的端口列表，例如：
+    /// (input clk, input [7:0] addr, output reg [15:0] data)
+    fn gen_port_list(&self, module: &Module) -> String {
+        if module.ports.is_empty() {
+            return "();".to_string();
+        }
+
+        let port_strings: Vec<String> = module
+            .ports
+            .iter()
+            .map(|p| {
+                let mut parts = Vec::new();
+                // 方向
+                parts.push(match p.direction {
+                    PortDir::Input => "input",
+                    PortDir::Output => "output",
+                    PortDir::Inout => "inout",
+                }.to_string());
+
+                // output reg 需要 reg 关键字
+                if p.direction == PortDir::Output && p.reg {
+                    parts.push("reg".to_string());
+                }
+
+                // 宽度
+                let width_str = Self::format_width(p.width.as_ref());
+                if !width_str.is_empty() {
+                    parts.push(width_str);
+                }
+
+                // 端口名
+                parts.push(p.name.clone());
+
+                parts.join(" ")
+            })
+            .collect();
+
+        format!("(\n    {}\n);", port_strings.join(",\n    "))
+    }
+
     fn gen_assign_target(&self, target: &AssignTarget) -> String {
         match target {
             AssignTarget::Signal(name, None) => name.clone(),
             AssignTarget::Signal(name, Some(idx)) => format!("{}[{}]", name, idx),
-            AssignTarget::Slice(name, high, low) => format!("{}[{}:{}]", name, high, low),
+            AssignTarget::Slice(name, high, low) => {
+                if high == low {
+                    format!("{}[{}]", name, high)
+                } else {
+                    format!("{}[{}:{}]", name, high, low)
+                }
+            }
         }
     }
 
@@ -143,7 +158,8 @@ impl VerilogBackend {
                 let op_str = match op {
                     UnaryOp::Not => "~",
                 };
-                format!("{}({})", op_str, self.gen_expr(e))
+                // 避免不必要的括号，简单处理为 ~expr
+                format!("~{}", self.gen_expr(e))
             }
             Expr::BinaryOp(op, e1, e2) => {
                 let op_str = match op {
@@ -176,7 +192,7 @@ impl VerilogBackend {
     }
 
     fn gen_process(&self, proc: &Process) -> Result<String, String> {
-        let sens_list: Vec<String> = proc
+        let sens_items: Vec<String> = proc
             .sensitivity
             .iter()
             .map(|s| match s {
@@ -185,70 +201,63 @@ impl VerilogBackend {
                 Sensitivity::Level(sig) => sig.clone(),
             })
             .collect();
-        let sens_str = sens_list.join(" or ");
-        let body = self.gen_statements(&proc.body);
-        Ok(format!(
-            "    always @({}) begin\n{}{}    end",
-            sens_str,
-            body,
-            if body.is_empty() { "" } else { "\n" }
-        ))
+
+        let sens_str = if sens_items.len() == 1 {
+            sens_items[0].clone()
+        } else {
+            sens_items.join(" or ")
+        };
+
+        let body_str = self.gen_statements(&proc.body);
+        let mut lines = vec![format!("    always @({}) begin", sens_str)];
+        for stmt_line in body_str.lines() {
+            lines.push(format!("        {}", stmt_line));
+        }
+        lines.push("    end".to_string());
+        Ok(lines.join("\n"))
     }
 
+    /// 生成语句块，返回字符串，每行语句已去除外层缩进，由调用者添加缩进
     fn gen_statements(&self, stmts: &[Statement]) -> String {
-        let mut lines = Vec::new();
+        let mut out = Vec::new();
         for stmt in stmts {
             match stmt {
                 Statement::BlockWrite(target, expr) => {
-                    lines.push(format!(
-                        "        {} = {};",
-                        self.gen_assign_target(target),
-                        self.gen_expr(expr)
-                    ));
+                    out.push(format!("{} = {};",
+                                     self.gen_assign_target(target),
+                                     self.gen_expr(expr)));
                 }
                 Statement::NonBlockWrite(target, expr) => {
-                    lines.push(format!(
-                        "        {} <= {};",
-                        self.gen_assign_target(target),
-                        self.gen_expr(expr)
-                    ));
+                    out.push(format!("{} <= {};",
+                                     self.gen_assign_target(target),
+                                     self.gen_expr(expr)));
                 }
                 Statement::If(cond, then_body, else_body) => {
-                    lines.push(format!("        if ({}) begin", self.gen_expr(cond)));
-                    lines.extend(
-                        self.gen_statements(then_body)
-                            .lines()
-                            .map(|l| format!("    {}", l)),
-                    );
-                    lines.push("        end".to_string());
-                    if !else_body.is_empty() {
-                        lines.push("        else begin".to_string());
-                        lines.extend(
-                            self.gen_statements(else_body)
-                                .lines()
-                                .map(|l| format!("    {}", l)),
-                        );
-                        lines.push("        end".to_string());
+                    out.push(format!("if ({}) begin", self.gen_expr(cond)));
+                    // 嵌套缩进：在已有基础上再加一级
+                    for line in self.gen_statements(then_body).lines() {
+                        out.push(format!("    {}", line));
                     }
+                    if !else_body.is_empty() {
+                        out.push("end else begin".to_string());
+                        for line in self.gen_statements(else_body).lines() {
+                            out.push(format!("    {}", line));
+                        }
+                    }
+                    out.push("end".to_string());
                 }
             }
         }
-        lines.join("\n")
+        out.join("\n")
     }
 
     fn gen_instance(&self, inst: &Instance) -> Result<String, String> {
-        let mut lines = Vec::new();
-        lines.push(format!("    {} {} (", inst.module_name, inst.instance_name));
+        let mut lines = vec![format!("    {} {} (", inst.module_name, inst.instance_name)];
         match &inst.port_map {
             PortMap::ByName(map) => {
                 for (i, (port, expr)) in map.iter().enumerate() {
                     let comma = if i == map.len() - 1 { "" } else { "," };
-                    lines.push(format!(
-                        "        .{}({}){}",
-                        port,
-                        self.gen_expr(expr),
-                        comma
-                    ));
+                    lines.push(format!("        .{}({}){}", port, self.gen_expr(expr), comma));
                 }
             }
             PortMap::ByPosition(exprs) => {

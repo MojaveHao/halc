@@ -6,7 +6,7 @@
     (input p_in 16)
     (output reg a_out 8)
     (output reg b_out 8)
-    (output reg p_out 16)
+    (output reg p_out 17)
   )
 
   (process (or (posedge clk) (negedge rst_n))
@@ -76,4 +76,4 @@
   )
 )
 
-(define-systolic-array my_systolic_128x128 128 8 16)
+(define-systolic-array my_systolic_2x2 2 8 17)
